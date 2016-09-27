@@ -1,10 +1,11 @@
 ### Command-line input: 1. file to process: this is the output from process_cohort.R including path.
-###                     2. expand flag: set to True if you want p-values calculated with variant pop freq considered.
-###                        As it currently stands, expand=T will artificially deflate p-values 
-###                     TODO: 1. Require more command line input to create output filename rather than deriving
-###                              from input filename and path
-###                           2. Implement argparse package for better command-line parsing
-###                           3. Bundle output code into function, with flag to indicate desired output type
+###                     2. output root: desired path and root of output filename. Current date and value of
+###                        expand flag are appended, along with the appropriate file extension.
+###                     3. output format: desired format of output, either 'json' or 'rdata' (which is R workspace
+###                        containing list of results equivalent to the json) or 'both'
+###                     4. expand flag: set to True if you want p-values calculated with variant pop freq considered.
+###                        As it currently stands, expand=T will artificially deflate p-values
+###                     TODO: 1. Implement argparse package for better command-line parsing
 
 library(doParallel)
 library(plyr)
@@ -12,7 +13,7 @@ library(grid)
 library(dplyr)
 library(jsonlite)
 
-msea_clust <- function(fin,expand,output_str) {
+msea_clust <- function(fin,output_str,outformat,expand) {
     
     get_ref_gene_length <- function(x) {
         cds.start <- as.numeric(x[7])
@@ -91,12 +92,19 @@ msea_clust <- function(fin,expand,output_str) {
         stop('No eligible genes to test.')
     }
     
-    #sink(file=paste0(output_str,'_lookahead.txt'))
-    #for (g in 1:length(genes_to_test)) {
-    #    mut <- mutations[mutations$RefSeq.ID==genes_to_test[g], c(1,2,22)]
-    #    cat(paste(mut$Symbol[1],mut$RefSeq.ID[1],paste(unique(mut$vtype),collapse='\t'), sep='\t'), '\n')
-    #}
-    #sink()
+    # build file for web interface lookahead completion 
+    sink(file=paste0(output_str,'_lookahead.txt'))
+    for (g in 1:length(genes_to_test)) { # for each transcript,
+        vsets <- vector()
+        mut <- mutations[mutations$RefSeq.ID==genes_to_test[g], c(1,2,13,14,15,16,17,18,19,20,21)]
+        for (i in 3:11) { # build a list of its vsets that have at least 4 mutations
+            if (sum(mut[[i]]) >= 4) {
+                vsets <- c(names(mut[i]),vsets)
+            }
+        }
+        cat(paste(mut$Symbol[1],mut$RefSeq.ID[1],paste(vsets,collapse='\t'), sep='\t'), '\n')
+    }
+    sink()
     
     q <- foreach (i=1:length(genes_to_test)) %dopar% {
         curr_gene <- mutations[mutations$RefSeq.ID==genes_to_test[i], ]
@@ -116,7 +124,7 @@ msea_clust <- function(fin,expand,output_str) {
         for (kk in 13:21) {
             curr_vset <- curr_gene[curr_gene[, kk]==1,]
             unexp_vset <- unexpanded_gene[unexpanded_gene[, kk]==1,]
-            if (nrow(curr_vset) > 0) {
+            if (nrow(curr_vset) >= 4) {
                 ptm <- proc.time()
                 symbol <- curr_vset$Symbol[1]
                 if (curr_vset$prom[1]==1) {
@@ -215,38 +223,50 @@ msea_clust <- function(fin,expand,output_str) {
         }
     }
     
-    # output results to R workspace file
-    save(q, file=paste0(output_str,"_Data4plot.RData"))
-    
-    # output results to one file as serialized json entries
-    sink(file=paste0(output_str,'.json'))
-    for (g in 1:length(q)) {
-        cat(toJSON(q[[g]],pretty=TRUE),'\nnext_entry\n')
-    }    
-    sink()     
+    if (outformat=='rdata' | outformat=='both') {
+        # output results to R workspace file
+        save(q, file=paste0(output_str,"_Data4plot.RData"))
+    }
+    if (outformat=='json' | outformat=='both') {
+        # output results to a single json as serialized entries
+        sink(file=paste0(output_str,'.json'))
+        for (g in 1:length(q)) {
+            cat(toJSON(q[[g]],pretty=TRUE),'\nnext_entry\n')
+        }    
+        sink()
+    }
 }
 
 args <- commandArgs(trailingOnly = T)
 infile <- args[1]
-expand <- as.logical(casefold(args[2],upper=T))
+outfileroot <- args[2]
+outformat <- casefold(args[3],upper=F)
+expand <- as.logical(casefold(args[4],upper=T))
 
-cl <- makeCluster(8,outfile='')
-registerDoParallel(cl)
-DATE <- Sys.Date()
-a <- strsplit(infile,'input/')[[1]][2]
-b <- strsplit(a,'\\.')[[1]][1]
-output_stem <- paste0(gsub('/','_',b), '_', DATE)
-output_directory <- '../output'
+# some input sanity checks
+if (file.access(infile,4) == -1) {
+    stop(paste0(infile, ' does not exist or you lack permission'))
+}
+if (file.access(dirname(outfileroot),2) == -1) {
+    stop(paste0('No write access to ', dirname(outfileroot)))
+}
+if (!is.element(outformat,c('rdata','both','json'))) {
+    stop('Need valid output format: [json,rdata,both]')
+}
+
+DATE <- gsub('-','',Sys.Date())
 if (expand){
     expand_str <- 'expand'
 }else{
     expand_str <- 'noexpand'
 }
-output_str <- paste0(output_directory, '/', output_stem, '_', expand_str)
+output_str <- paste0(outfileroot, '-', DATE, '-', expand_str)
 
-msea_clust(infile,expand,output_str)
+cl <- makeCluster(8,outfile='')
+registerDoParallel(cl)
 
-DATE <- Sys.Date()
+msea_clust(infile,output_str,outformat,expand)
+
 ### WRITE SESSION INFO TO FILE #####################################################################
 sink(file=paste0(output_str, "_Session_Info.txt"));
 
